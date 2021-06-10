@@ -8,6 +8,7 @@ import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IWETH.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "./interfaces/IRewardPool.sol";
 
 contract Airlock is Ownable {
     using SafeMath for uint256;
@@ -21,7 +22,9 @@ contract Airlock is Ownable {
     address public immutable WETH;
     address public immutable ARMOR;
     mapping(address => address) public pairs;
-    mapping(address => address) public rewardPools;
+    mapping(address => LpPool) public rewardPools;
+    mapping(address => uint256) public totalLpAmount;
+    uint256 public armorReward;
 
     bool private locked;
 
@@ -30,7 +33,15 @@ contract Airlock is Ownable {
         address pair;
         uint256 amount;
         uint256 claimedAmount;
+        uint256 rewardDebt;
         uint256 maturity;
+    }
+
+    struct LpPool {
+        address pool;
+        uint256 lpStaked;
+        uint256 reward;
+        uint256 accArmorPerLp;
     }
 
     // a user can hold multiple locked LP batches
@@ -44,6 +55,12 @@ contract Airlock is Ownable {
     );
 
     event LPClaimed(
+        address indexed holder,
+        address indexed pair,
+        uint256 amount
+    );
+
+    event RewardClaimed(
         address indexed holder,
         address indexed pair,
         uint256 amount
@@ -76,7 +93,12 @@ contract Airlock is Ownable {
             IUniswapV2Router02(uniswapRouter).factory()
         ).getPair(token, ARMOR);
         pairs[token] = pair;
-        rewardPools[pair] = rewardPool;
+        rewardPools[pair] = LpPool({
+            pool: rewardPool,
+            lpStaked: 0,
+            reward: 0,
+            accArmorPerLp: 0
+        });
     }
 
     function setTreasury(address _treasury) external onlyOwner {
@@ -85,14 +107,14 @@ contract Airlock is Ownable {
 
     function flushToTreasury(uint256 amount) external onlyOwner {
         require(treasury != address(0), "ARMOR: treasury not set");
+        uint256 balance = IERC20(ARMOR).balanceOf(address(this));
         require(
-            IERC20(ARMOR).transfer(treasury, amount),
-            "Treasury transfer failed"
+            balance.sub(armorReward) >= amount,
+            "ARMOR: insufficient ARMOR in AirLock"
         );
+        IERC20(ARMOR).safeTransfer(treasury, amount);
     }
 
-    // splits the amount of ETH according to a buy pressure formula, swaps the splitted fee,
-    // and pools the remaining ETH with ARMOR to create LP tokens
     function deposit(
         address beneficiary,
         address token,
@@ -130,7 +152,7 @@ contract Airlock is Ownable {
 
         uint256 balance = IERC20(ARMOR).balanceOf(address(this));
         require(
-            balance >= armorRequired,
+            balance.sub(armorReward) >= armorRequired,
             "ARMOR: insufficient ARMOR in AirLock"
         );
 
@@ -138,18 +160,24 @@ contract Airlock is Ownable {
         IERC20(ARMOR).safeTransfer(pair, armorRequired);
 
         uint256 liquidityCreated = IUniswapV2Pair(pair).mint(address(this));
-
+        totalLpAmount[pair] = totalLpAmount[pair].add(liquidityCreated);
         uint256 maturity = block.timestamp.add(lockPeriod);
 
+        uint256 id = lockedLP[beneficiary].length;
         lockedLP[beneficiary].push(
             LPbatch({
                 holder: beneficiary,
                 pair: pair,
                 amount: liquidityCreated,
                 claimedAmount: 0,
+                rewardDebt: 0,
                 maturity: maturity
             })
         );
+
+        if (rewardPools[pair].pool != address(0)) {
+            _stakeLp(pair, beneficiary, id);
+        }
 
         emit LPQueued(
             beneficiary,
@@ -165,7 +193,6 @@ contract Airlock is Ownable {
         deposit(msg.sender, WETH, msg.value);
     }
 
-    // claimps the oldest LP batch according to the lock period formula
     function claimLP(uint256 id) public returns (bool) {
         require(id < lockedLP[msg.sender].length, "ARMOR: nothing to claim.");
         LPbatch storage batch = lockedLP[msg.sender][id];
@@ -179,14 +206,82 @@ contract Airlock is Ownable {
             batch.claimedAmount < amountToClaim,
             "ARMOR: nothing to claim."
         );
+        _updatePool(batch.pair);
+        _claimArmorReward(msg.sender, id);
         uint256 availableLp = amountToClaim.sub(batch.claimedAmount);
-        IERC20(batch.pair).safeTransfer(msg.sender, availableLp);
-        batch.claimedAmount = amountToClaim;
+        if (availableLp > 0) {
+            LpPool storage pool = rewardPools[batch.pair];
+            IRewardPool(pool.pool).withdraw(availableLp);
+            batch.claimedAmount = amountToClaim;
+            pool.lpStaked = pool.lpStaked.sub(availableLp);
+            batch.rewardDebt = pool
+            .accArmorPerLp
+            .mul(batch.amount.sub(batch.claimedAmount))
+            .div(1e12);
 
-        emit LPClaimed(msg.sender, batch.pair, availableLp);
+            IERC20(batch.pair).safeTransfer(msg.sender, availableLp);
+            emit LPClaimed(msg.sender, batch.pair, availableLp);
+        }
+    }
+
+    function claimArmorReward(uint256 id) external returns (bool) {
+        require(id < lockedLP[msg.sender].length, "ARMOR: nothing to claim.");
+        _updatePool(lockedLP[msg.sender][id].pair);
+        _claimArmorReward(msg.sender, id);
     }
 
     function lockedLPLength(address holder) public view returns (uint256) {
         return lockedLP[holder].length;
+    }
+
+    function _updatePool(address pair) internal {
+        LpPool storage pool = rewardPools[pair];
+        uint256 armorBalance = IERC20(ARMOR).balanceOf(address(this));
+        IRewardPool(pool.pool).getReward();
+        uint256 armorBalanceAfter = IERC20(ARMOR).balanceOf(address(this));
+        uint256 reward = armorBalanceAfter.sub(armorBalance);
+        pool.accArmorPerLp = pool.accArmorPerLp.add(
+            reward.mul(1e12).div(pool.lpStaked)
+        );
+        pool.reward = pool.reward.add(reward);
+        armorReward = armorReward.add(reward);
+    }
+
+    function _stakeLp(
+        address pair,
+        address holder,
+        uint256 id
+    ) internal {
+        _updatePool(pair);
+        LPbatch storage lpBatch = lockedLP[holder][id];
+        LpPool storage pool = rewardPools[pair];
+        IERC20(pair).safeApprove(pool.pool, 0);
+        IERC20(pair).safeApprove(pool.pool, lpBatch.amount);
+        IRewardPool(pool.pool).stake(lpBatch.amount);
+        pool.lpStaked = pool.lpStaked.add(lpBatch.amount);
+        lpBatch.rewardDebt = pool.accArmorPerLp.mul(lpBatch.amount).div(1e12);
+    }
+
+    function _claimArmorReward(address holder, uint256 id) internal {
+        LPbatch storage lpBatch = lockedLP[holder][id];
+        LpPool storage pool = rewardPools[lpBatch.pair];
+        uint256 reward = lpBatch
+        .amount
+        .sub(lpBatch.claimedAmount)
+        .mul(pool.accArmorPerLp)
+        .div(1e12)
+        .sub(lpBatch.rewardDebt);
+        uint256 rewardToClaim = reward > pool.reward ? pool.reward : reward;
+        if (rewardToClaim > 0) {
+            IERC20(ARMOR).safeTransfer(holder, rewardToClaim);
+            pool.reward = pool.reward.sub(rewardToClaim);
+            lpBatch.rewardDebt = pool
+            .accArmorPerLp
+            .mul(lpBatch.amount.sub(lpBatch.claimedAmount))
+            .div(1e12);
+            armorReward = armorReward.sub(rewardToClaim);
+
+            emit RewardClaimed(holder, lpBatch.pair, rewardToClaim);
+        }
     }
 }
