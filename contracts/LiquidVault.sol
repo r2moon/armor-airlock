@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.7.1;
 pragma experimental ABIEncoderV2;
+
 import '@openzeppelin/contracts/access/Ownable.sol';
 import '@openzeppelin/contracts/math/SafeMath.sol';
 import '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import './facades/FeeDistributorLike.sol';
 import '@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol';
 import '@uniswap/v2-periphery/contracts/interfaces/IWETH.sol';
 import '@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol';
@@ -33,9 +33,6 @@ contract LiquidVault is Ownable {
     bytes16 internal constant BETA = 0xc03a4d1120d7b1600000000000000000; // // -beta = -0.75
     bytes16 internal constant LMIN = 0x400f5180000000000000000000000000; // Lmin
 
-    // buy pressure constants
-    bytes16 internal constant MAX_FEE = 0x40044000000000000000000000000000; // 40%
-
     // lock percentage constants
     bytes16 internal constant ONE_BYTES = 0x3fff0000000000000000000000000000; // 1
     bytes16 internal constant ONE_TOKEN_BYTES = 0x403abc16d674ec800000000000000000; // 1e18
@@ -51,13 +48,11 @@ contract LiquidVault is Ownable {
         IERC20 R3T;
         IUniswapV2Router02 uniswapRouter;
         IUniswapV2Pair tokenPair;
-        FeeDistributorLike feeDistributor;
         PriceOracle uniswapOracle;
         IWETH weth;
     }
 
     struct PurchaseLPVariables {
-        uint ethFee;
         uint netEth;
         uint reserve1;
         uint reserve2;
@@ -122,7 +117,6 @@ contract LiquidVault is Ownable {
 
     function seed(
         IERC20 r3t,
-        FeeDistributorLike _feeDistributor,
         IUniswapV2Router02 _uniswapRouter,
         IUniswapV2Pair _uniswapPair,
         address _treasury,
@@ -130,7 +124,6 @@ contract LiquidVault is Ownable {
     ) public onlyOwner {
         require(address(config.R3T) == address(0), 'Already initiated');
         config.R3T = r3t;
-        config.feeDistributor = _feeDistributor;
         config.tokenPair = _uniswapPair;
         config.uniswapRouter = _uniswapRouter;
         config.weth = IWETH(config.uniswapRouter.WETH());
@@ -156,11 +149,8 @@ contract LiquidVault is Ownable {
     // and pools the remaining ETH with R3T to create LP tokens
     function purchaseLPFor(address beneficiary) public payable lock {
         require(msg.value > 0, 'R3T: eth required to mint R3T LP');
-        config.feeDistributor.distributeFees();
         PurchaseLPVariables memory vars;
-        uint ethFeePercentage = feeUINT();
-        vars.ethFee = msg.value.mul(ethFeePercentage).div(1000);
-        vars.netEth = msg.value.sub(vars.ethFee);
+        vars.netEth = msg.value;
 
         (vars.reserve1, vars.reserve2, ) = config.tokenPair.getReserves();
 
@@ -189,19 +179,6 @@ contract LiquidVault is Ownable {
         config.uniswapOracle.update();
 
         uint liquidityCreated = config.tokenPair.mint(address(this));
-
-        if (vars.ethFee > 0) {
-            address[] memory path = new address[](2);
-            path[0] = address(config.weth);
-            path[1] = address(config.R3T);
-
-            config.uniswapRouter.swapExactETHForTokens{ value:vars.ethFee }(
-                0,
-                path,
-                address(this),
-                block.timestamp
-            );
-        }
 
         lockedLP[beneficiary].push(
             LPbatch({
@@ -323,28 +300,6 @@ contract LiquidVault is Ownable {
 
     function square(bytes16 number) internal pure returns (bytes16) {
         return number.mul(number);
-    }
-
-    function fee() public view returns (bytes16) {
-        uint tokensInUniswapUint = config.R3T.balanceOf(address(config.tokenPair));
-
-        if (tokensInUniswapUint >= calibration.maxReserves) {
-            return MAX_FEE; // 40%
-        }
-        bytes16 tokensInUniswap = ABDKMathQuad.fromUInt(tokensInUniswapUint).div(ABDKMathQuad.fromUInt(1e18));
-
-        bytes16 t_squared = square(tokensInUniswap);
-        bytes16 t_cubed = t_squared.mul(tokensInUniswap);
-
-        bytes16 term1 = calibration.a.mul(t_cubed);
-        bytes16 term2 = calibration.b.mul(t_squared);
-        bytes16 term3 = calibration.c.mul(tokensInUniswap);
-        return term1.add(term2).add(term3).add(calibration.d);
-    }
-
-    function feeUINT() public view returns (uint) {
-        uint multiplier = 10;
-        return fee().mul(ABDKMathQuad.fromUInt(multiplier)).toUInt();
     }
 
     // d = dMax*(1/(b.p+1));
