@@ -14,7 +14,6 @@ contract Airlock is Ownable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
-    address public treasury;
     mapping(address => LPbatch[]) public lockedLP;
     uint256 public lockPeriod;
     uint256 public vestingPeriod;
@@ -70,19 +69,17 @@ contract Airlock is Ownable {
         address armor,
         address _uniswapRouter,
         uint256 _lockPeriod,
-        uint256 _vestingPeriod,
-        address _treasury
+        uint256 _vestingPeriod
     ) {
         ARMOR = armor;
         uniswapRouter = _uniswapRouter;
         WETH = IUniswapV2Router02(_uniswapRouter).WETH();
         lockPeriod = _lockPeriod;
         vestingPeriod = _vestingPeriod;
-        treasury = _treasury;
     }
 
     modifier lock {
-        require(!locked, "ARMOR: reentrancy violation");
+        require(!locked, "Airlock: reentrancy violation");
         locked = true;
         _;
         locked = false;
@@ -92,7 +89,9 @@ contract Airlock is Ownable {
         address pair = IUniswapV2Factory(
             IUniswapV2Router02(uniswapRouter).factory()
         ).getPair(token, ARMOR);
+        require(pair != address(0), "Airlock: pair does not exist");
         pairs[token] = pair;
+        require(rewardPool != address(0), "Airlock: reward cannot be zero");
         rewardPools[pair] = LpPool({
             pool: rewardPool,
             lpStaked: 0,
@@ -101,16 +100,15 @@ contract Airlock is Ownable {
         });
     }
 
-    function setTreasury(address _treasury) external onlyOwner {
-        treasury = _treasury;
-    }
-
-    function flushToTreasury(uint256 amount) external onlyOwner {
-        require(treasury != address(0), "ARMOR: treasury not set");
+    function flushToTreasury(uint256 amount, address treasury)
+        external
+        onlyOwner
+    {
+        require(treasury != address(0), "Airlock: treasury not set");
         uint256 balance = IERC20(ARMOR).balanceOf(address(this));
         require(
             balance.sub(armorReward) >= amount,
-            "ARMOR: insufficient ARMOR in AirLock"
+            "Airlock: insufficient ARMOR in AirLock"
         );
         IERC20(ARMOR).safeTransfer(treasury, amount);
     }
@@ -120,10 +118,13 @@ contract Airlock is Ownable {
         address token,
         uint256 amount
     ) public payable lock {
-        require(pairs[token] != address(0), "ARMOR: Pair is not registered");
-        require(msg.value == 0 || token == WETH, "ARMOR: must be WETH");
-        require(msg.value == 0 || msg.value == amount, "ARMOR: invalid amount");
-        require(amount > 0, "ARMOR: amount must be greater than zero");
+        require(pairs[token] != address(0), "Airlock: Pair is not registered");
+        require(msg.value == 0 || token == WETH, "Airlock: must be WETH");
+        require(
+            msg.value == 0 || msg.value == amount,
+            "Airlock: invalid amount"
+        );
+        require(amount > 0, "Airlock: amount must be greater than zero");
 
         address pair = pairs[token];
         if (msg.value > 0) {
@@ -153,7 +154,7 @@ contract Airlock is Ownable {
         uint256 balance = IERC20(ARMOR).balanceOf(address(this));
         require(
             balance.sub(armorReward) >= armorRequired,
-            "ARMOR: insufficient ARMOR in AirLock"
+            "Airlock: insufficient ARMOR in AirLock"
         );
 
         IERC20(token).safeTransfer(pair, amount);
@@ -175,9 +176,7 @@ contract Airlock is Ownable {
             })
         );
 
-        if (rewardPools[pair].pool != address(0)) {
-            _stakeLp(pair, beneficiary, id);
-        }
+        _stakeLp(pair, beneficiary, id);
 
         emit LPQueued(
             beneficiary,
@@ -194,9 +193,9 @@ contract Airlock is Ownable {
     }
 
     function claimLP(uint256 id) public returns (bool) {
-        require(id < lockedLP[msg.sender].length, "ARMOR: nothing to claim.");
+        require(id < lockedLP[msg.sender].length, "Airlock: nothing to claim.");
         LPbatch storage batch = lockedLP[msg.sender][id];
-        require(batch.maturity < block.timestamp, "ARMOR: LP still locked.");
+        require(batch.maturity < block.timestamp, "Airlock: LP still locked.");
 
         uint256 amountToClaim = batch
         .amount
@@ -204,7 +203,7 @@ contract Airlock is Ownable {
         .div(vestingPeriod);
         require(
             batch.claimedAmount < amountToClaim,
-            "ARMOR: nothing to claim."
+            "Airlock: nothing to claim."
         );
         _updatePool(batch.pair);
         _claimArmorReward(msg.sender, id);
@@ -225,7 +224,7 @@ contract Airlock is Ownable {
     }
 
     function claimArmorReward(uint256 id) external returns (bool) {
-        require(id < lockedLP[msg.sender].length, "ARMOR: nothing to claim.");
+        require(id < lockedLP[msg.sender].length, "Airlock: nothing to claim.");
         _updatePool(lockedLP[msg.sender][id].pair);
         _claimArmorReward(msg.sender, id);
     }

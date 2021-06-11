@@ -1,6 +1,6 @@
 {
-  "name": "rock3t-prototype-contracts",
-  "version": "0.0.1",
+  "name": "armor-airlock-drop",
+  "version": "1.0.0",
   "description": "",
   "main": "truffle-config.js",
   "directories": {
