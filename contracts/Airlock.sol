@@ -108,7 +108,7 @@ contract Airlock is Ownable {
         external
         onlyOwner
     {
-        require(treasury != address(0), "Airlock: treasury not set");
+        require(treasury != address(0), "Airlock: treasury cannot be zero");
         uint256 balance = IERC20(ARMOR).balanceOf(address(this));
         require(
             balance.sub(armorReward) >= amount,
@@ -233,7 +233,7 @@ contract Airlock is Ownable {
         _claimArmorReward(msg.sender, id);
     }
 
-    function lockedLPLength(address holder) public view returns (uint256) {
+    function lockedLPLength(address holder) external view returns (uint256) {
         return lockedLP[holder].length;
     }
 
@@ -243,9 +243,11 @@ contract Airlock is Ownable {
         IRewardPool(pool.pool).getReward();
         uint256 armorBalanceAfter = IERC20(ARMOR).balanceOf(address(this));
         uint256 reward = armorBalanceAfter.sub(armorBalance);
-        pool.accArmorPerLp = pool.accArmorPerLp.add(
-            reward.mul(1e12).div(pool.lpStaked)
-        );
+        if (pool.lpStaked > 0) {
+            pool.accArmorPerLp = pool.accArmorPerLp.add(
+                reward.mul(1e12).div(pool.lpStaked)
+            );
+        }
         pool.reward = pool.reward.add(reward);
         armorReward = armorReward.add(reward);
     }
