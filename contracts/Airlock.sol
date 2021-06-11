@@ -86,9 +86,9 @@ contract Airlock is Ownable {
     }
 
     function addToken(address token, address rewardPool) external onlyOwner {
-        address pair = IUniswapV2Factory(
-            IUniswapV2Router02(uniswapRouter).factory()
-        ).getPair(token, ARMOR);
+        address pair =
+            IUniswapV2Factory(IUniswapV2Router02(uniswapRouter).factory())
+                .getPair(token, ARMOR);
         require(pair != address(0), "Airlock: pair does not exist");
         pairs[token] = pair;
         require(rewardPool != address(0), "Airlock: reward cannot be zero");
@@ -137,8 +137,8 @@ contract Airlock is Ownable {
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
 
-        (uint256 reserve1, uint256 reserve2, ) = IUniswapV2Pair(pair)
-        .getReserves();
+        (uint256 reserve1, uint256 reserve2, ) =
+            IUniswapV2Pair(pair).getReserves();
 
         uint256 armorRequired;
         if (ARMOR < token) {
@@ -201,10 +201,10 @@ contract Airlock is Ownable {
         LPbatch storage batch = lockedLP[msg.sender][id];
         require(batch.maturity < block.timestamp, "Airlock: LP still locked.");
 
-        uint256 amountToClaim = batch
-        .amount
-        .mul(block.timestamp.sub(batch.maturity))
-        .div(vestingPeriod);
+        uint256 amountToClaim =
+            batch.amount.mul(block.timestamp.sub(batch.maturity)).div(
+                vestingPeriod
+            );
         require(
             batch.claimedAmount < amountToClaim,
             "Airlock: nothing to claim."
@@ -218,9 +218,9 @@ contract Airlock is Ownable {
             batch.claimedAmount = amountToClaim;
             pool.lpStaked = pool.lpStaked.sub(availableLp);
             batch.rewardDebt = pool
-            .accArmorPerLp
-            .mul(batch.amount.sub(batch.claimedAmount))
-            .div(1e12);
+                .accArmorPerLp
+                .mul(batch.amount.sub(batch.claimedAmount))
+                .div(1e12);
 
             IERC20(batch.pair).safeTransfer(msg.sender, availableLp);
             emit LPClaimed(msg.sender, batch.pair, availableLp);
@@ -270,20 +270,21 @@ contract Airlock is Ownable {
     function _claimArmorReward(address holder, uint256 id) internal {
         LPbatch storage lpBatch = lockedLP[holder][id];
         LpPool storage pool = rewardPools[lpBatch.pair];
-        uint256 reward = lpBatch
-        .amount
-        .sub(lpBatch.claimedAmount)
-        .mul(pool.accArmorPerLp)
-        .div(1e12)
-        .sub(lpBatch.rewardDebt);
+        uint256 reward =
+            lpBatch
+                .amount
+                .sub(lpBatch.claimedAmount)
+                .mul(pool.accArmorPerLp)
+                .div(1e12)
+                .sub(lpBatch.rewardDebt);
         uint256 rewardToClaim = reward > pool.reward ? pool.reward : reward;
         if (rewardToClaim > 0) {
             IERC20(ARMOR).safeTransfer(holder, rewardToClaim);
             pool.reward = pool.reward.sub(rewardToClaim);
             lpBatch.rewardDebt = pool
-            .accArmorPerLp
-            .mul(lpBatch.amount.sub(lpBatch.claimedAmount))
-            .div(1e12);
+                .accArmorPerLp
+                .mul(lpBatch.amount.sub(lpBatch.claimedAmount))
+                .div(1e12);
             armorReward = armorReward.sub(rewardToClaim);
 
             emit RewardClaimed(holder, lpBatch.pair, rewardToClaim);

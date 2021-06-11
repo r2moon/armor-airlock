@@ -6,7 +6,10 @@ async function deployUniswap(accounts) {
   const feeSetter = accounts[0];
   const uniswapFactory = await UniswapFactory.new(feeSetter);
   const weth = await UniswapWETH.new();
-  const uniswapRouter = await UniswapRouter.new(uniswapFactory.address, weth.address);
+  const uniswapRouter = await UniswapRouter.new(
+    uniswapFactory.address,
+    weth.address,
+  );
 
   return { uniswapFactory, weth, uniswapRouter };
 }
