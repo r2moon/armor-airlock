@@ -92,6 +92,10 @@ contract Airlock is Ownable {
         require(pair != address(0), "Airlock: pair does not exist");
         pairs[token] = pair;
         require(rewardPool != address(0), "Airlock: reward cannot be zero");
+        require(
+            IRewardPool(rewardPool).stakeToken() == pair,
+            "Airlock: Invalid reward pool"
+        );
         rewardPools[pair] = LpPool({
             pool: rewardPool,
             lpStaked: 0,

@@ -119,8 +119,28 @@ contract('airlock', function (accounts) {
       );
     });
 
+    it('Revert if reward pool is invalid', async () => {
+      const tempToken = await MockERC20.new('Temp', 'TEMP', 18, '100000');
+      const tempRewardPool = await MockRewardPool.new(
+        tempToken.address,
+        armorToken.address,
+      );
+
+      await expectRevert(
+        airlock.addToken(weth.address, tempRewardPool.address),
+        'Airlock: Invalid reward pool',
+      );
+    });
+
     it('should add token by owner', async () => {
       await airlock.addToken(weth.address, rewardPool.address);
+
+      assert.equal(await airlock.pairs(weth.address), wethPair.address);
+      const poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.pool, rewardPool.address);
+      assert.equal(poolInfo.lpStaked, '0');
+      assert.equal(poolInfo.reward, '0');
+      assert.equal(poolInfo.accArmorPerLp, '0');
     });
   });
 });
