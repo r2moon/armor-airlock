@@ -8,4 +8,6 @@ interface IRewardPool {
     function withdraw(uint256 amount) external;
 
     function getReward() external;
+
+    function earned(address account) external view returns (uint256);
 }

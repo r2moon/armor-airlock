@@ -195,6 +195,9 @@ contract Airlock is Ownable, ReentrancyGuard {
             batch.amount.mul(block.timestamp.sub(batch.maturity)).div(
                 vestingPeriod
             );
+        if (amountToClaim > batch.amount) {
+            amountToClaim = batch.amount;
+        }
         require(
             batch.claimedAmount < amountToClaim,
             "Airlock: nothing to claim."
@@ -215,10 +218,63 @@ contract Airlock is Ownable, ReentrancyGuard {
         emit LPClaimed(msg.sender, batch.pair, availableLp);
     }
 
-    function claimArmorReward(uint256 id) external returns (bool) {
+    function pendingLP(address beneficiary, uint256 id)
+        external
+        view
+        returns (uint256)
+    {
+        if (id >= lockedLP[beneficiary].length) {
+            return 0;
+        }
+        LPbatch memory batch = lockedLP[beneficiary][id];
+        if (batch.maturity >= block.timestamp) {
+            return 0;
+        }
+        uint256 amountToClaim =
+            batch.amount.mul(block.timestamp.sub(batch.maturity)).div(
+                vestingPeriod
+            );
+        if (amountToClaim > batch.amount) {
+            amountToClaim = batch.amount;
+        }
+        if (batch.claimedAmount >= amountToClaim) {
+            return 0;
+        }
+        return amountToClaim.sub(batch.claimedAmount);
+    }
+
+    function claimArmorReward(uint256 id) external {
         require(id < lockedLP[msg.sender].length, "Airlock: nothing to claim.");
         _updatePool(lockedLP[msg.sender][id].pair);
         _claimArmorReward(msg.sender, id);
+    }
+
+    function pendingArmorReward(address beneficiary, uint256 id)
+        external
+        view
+        returns (uint256)
+    {
+        if (id >= lockedLP[beneficiary].length) {
+            return 0;
+        }
+        LPbatch memory lpBatch = lockedLP[beneficiary][id];
+        LpPool memory pool = rewardPools[lpBatch.pair];
+        uint256 reward = IRewardPool(pool.pool).earned(address(this));
+        if (pool.lpStaked > 0) {
+            pool.accArmorPerLp = pool.accArmorPerLp.add(
+                reward.mul(1e12).div(pool.lpStaked)
+            );
+        }
+        pool.reward = pool.reward.add(reward);
+        uint256 pendingReward =
+            lpBatch
+                .amount
+                .sub(lpBatch.claimedAmount)
+                .mul(pool.accArmorPerLp)
+                .div(1e12)
+                .sub(lpBatch.rewardDebt);
+
+        return pendingReward > pool.reward ? pool.reward : pendingReward;
     }
 
     function lockedLPLength(address holder) external view returns (uint256) {

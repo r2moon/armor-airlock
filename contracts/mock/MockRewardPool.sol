@@ -29,4 +29,8 @@ contract MockRewardPool {
             rewardToken.safeTransfer(msg.sender, rewardBalance);
         }
     }
+
+    function earned(address account) external view returns (uint256) {
+        return rewardToken.balanceOf(address(this));
+    }
 }

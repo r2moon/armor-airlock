@@ -493,12 +493,9 @@ contract('airlock', function (accounts) {
       let claimableLP = liquidityCreated
         .mul(timeAfterLockPeriod)
         .div(vestingPeriod);
+
       let tx = await airlock.claimLP(0, { from: beneficiary });
 
-      assert.equal(
-        lpBalanceBefore.add(claimableLP).toString(),
-        (await wethPair.balanceOf(beneficiary)).toString(),
-      );
       expectEvent(tx, 'LPClaimed', {
         holder: beneficiary,
         pair: wethPair.address,
@@ -540,6 +537,10 @@ contract('airlock', function (accounts) {
         .mul(timeAfterLockPeriod.add(timeAlreadyPassed))
         .div(vestingPeriod)
         .sub(currentClaimedLP);
+      assert.equal(
+        claimableLP.toString(),
+        (await airlock.pendingLP(beneficiary, 0)).toString(),
+      );
       tx = await airlock.claimLP(0, { from: beneficiary });
 
       assert.equal(
@@ -582,6 +583,10 @@ contract('airlock', function (accounts) {
       await time.increase(timeAfterLockPeriod.toString());
       lpBalanceBefore = new BN(await wethPair.balanceOf(beneficiary));
       claimableLP = liquidityCreated.sub(currentClaimedLP);
+      assert.equal(
+        claimableLP.toString(),
+        (await airlock.pendingLP(beneficiary, 0)).toString(),
+      );
       tx = await airlock.claimLP(0, { from: beneficiary });
 
       assert.equal(
@@ -628,7 +633,6 @@ contract('airlock', function (accounts) {
       let armorBalanceInAirLock = new BN(
         await armorToken.balanceOf(airlock.address),
       );
-      let tx = await airlock.claimArmorReward(0, { from: beneficiary });
 
       let liquidityCreated = new BN(await wethPair.totalSupply())
         .mul(depositAmount)
@@ -641,6 +645,13 @@ contract('airlock', function (accounts) {
       let rewardToClaim = accArmorPerLp
         .mul(liquidityCreated)
         .div(rewardMultiplier);
+
+      assert.equal(
+        rewardToClaim.toString(),
+        (await airlock.pendingArmorReward(beneficiary, 0)).toString(),
+      );
+
+      let tx = await airlock.claimArmorReward(0, { from: beneficiary });
 
       expectEvent(tx, 'RewardClaimed', {
         holder: beneficiary,
