@@ -25,6 +25,8 @@ contract MockRewardPool {
 
     function getReward() external {
         uint256 rewardBalance = rewardToken.balanceOf(address(this));
-        rewardToken.safeTransfer(msg.sender, rewardBalance);
+        if (rewardBalance > 0) {
+            rewardToken.safeTransfer(msg.sender, rewardBalance);
+        }
     }
 }

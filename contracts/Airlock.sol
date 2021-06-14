@@ -4,13 +4,14 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IWETH.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IRewardPool.sol";
 
-contract Airlock is Ownable {
+contract Airlock is Ownable, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -59,11 +60,7 @@ contract Airlock is Ownable {
         uint256 amount
     );
 
-    event RewardClaimed(
-        address indexed holder,
-        address indexed pair,
-        uint256 amount
-    );
+    event RewardClaimed(address indexed holder, uint256 amount);
 
     constructor(
         address armor,
@@ -76,13 +73,6 @@ contract Airlock is Ownable {
         WETH = IUniswapV2Router02(_uniswapRouter).WETH();
         lockPeriod = _lockPeriod;
         vestingPeriod = _vestingPeriod;
-    }
-
-    modifier lock {
-        require(!locked, "Airlock: reentrancy violation");
-        locked = true;
-        _;
-        locked = false;
     }
 
     function addToken(address token, address rewardPool) external onlyOwner {
@@ -121,7 +111,7 @@ contract Airlock is Ownable {
         address beneficiary,
         address token,
         uint256 amount
-    ) public payable lock {
+    ) public payable nonReentrant {
         require(pairs[token] != address(0), "Airlock: Pair is not registered");
         require(msg.value == 0 || token == WETH, "Airlock: must be WETH");
         require(
@@ -192,11 +182,11 @@ contract Airlock is Ownable {
         );
     }
 
-    function receive() public payable {
+    receive() external payable {
         deposit(msg.sender, WETH, msg.value);
     }
 
-    function claimLP(uint256 id) public returns (bool) {
+    function claimLP(uint256 id) external {
         require(id < lockedLP[msg.sender].length, "Airlock: nothing to claim.");
         LPbatch storage batch = lockedLP[msg.sender][id];
         require(batch.maturity < block.timestamp, "Airlock: LP still locked.");
@@ -212,19 +202,17 @@ contract Airlock is Ownable {
         _updatePool(batch.pair);
         _claimArmorReward(msg.sender, id);
         uint256 availableLp = amountToClaim.sub(batch.claimedAmount);
-        if (availableLp > 0) {
-            LpPool storage pool = rewardPools[batch.pair];
-            IRewardPool(pool.pool).withdraw(availableLp);
-            batch.claimedAmount = amountToClaim;
-            pool.lpStaked = pool.lpStaked.sub(availableLp);
-            batch.rewardDebt = pool
-                .accArmorPerLp
-                .mul(batch.amount.sub(batch.claimedAmount))
-                .div(1e12);
+        LpPool storage pool = rewardPools[batch.pair];
+        IRewardPool(pool.pool).withdraw(availableLp);
+        batch.claimedAmount = amountToClaim;
+        pool.lpStaked = pool.lpStaked.sub(availableLp);
+        batch.rewardDebt = pool
+            .accArmorPerLp
+            .mul(batch.amount.sub(batch.claimedAmount))
+            .div(1e12);
 
-            IERC20(batch.pair).safeTransfer(msg.sender, availableLp);
-            emit LPClaimed(msg.sender, batch.pair, availableLp);
-        }
+        IERC20(batch.pair).safeTransfer(msg.sender, availableLp);
+        emit LPClaimed(msg.sender, batch.pair, availableLp);
     }
 
     function claimArmorReward(uint256 id) external returns (bool) {
@@ -287,7 +275,7 @@ contract Airlock is Ownable {
                 .div(1e12);
             armorReward = armorReward.sub(rewardToClaim);
 
-            emit RewardClaimed(holder, lpBatch.pair, rewardToClaim);
+            emit RewardClaimed(holder, rewardToClaim);
         }
     }
 }

@@ -1,6 +1,7 @@
 const Ganache = require('./helpers/ganache');
 const deployUniswap = require('./helpers/deployUniswap');
 const {
+  expectEvent,
   expectRevert,
   constants,
   time,
@@ -22,6 +23,7 @@ contract('airlock', function (accounts) {
   const ethUnit = new BN('1000000000000000000');
   const btcUnit = new BN('100000000');
   const armorUnit = new BN('1000000000000000000');
+  const rewardMultiplier = new BN('1000000000000');
 
   let uniswapFactory;
   let uniswapRouter;
@@ -44,6 +46,10 @@ contract('airlock', function (accounts) {
   const initalWbtcLp = new BN('10').mul(btcUnit); // 10 WBTC
   const initalArmorLpForWbtc = new BN('100000').mul(armorUnit); // 100000 ARMOR
   const armorInAirlock = new BN('10000000').mul(armorUnit); // 10000000 ARMOR
+
+  const sendArmorReward = async (rewardPool, amount) => {
+    await armorToken.transfer(rewardPool.address, amount);
+  };
 
   beforeEach(async function () {
     const contracts = await deployUniswap(accounts);
@@ -129,11 +135,17 @@ contract('airlock', function (accounts) {
     });
 
     it('check lockPeriod', async () => {
-      assert.equal(await airlock.lockPeriod(), lockPeriod);
+      assert.equal(
+        (await airlock.lockPeriod()).toString(),
+        lockPeriod.toString(),
+      );
     });
 
     it('check vestingPeriod', async () => {
-      assert.equal(await airlock.vestingPeriod(), vestingPeriod);
+      assert.equal(
+        (await airlock.vestingPeriod()).toString(),
+        vestingPeriod.toString(),
+      );
     });
   });
 
@@ -192,6 +204,9 @@ contract('airlock', function (accounts) {
       await airlock.addToken(weth.address, wethRewardPool.address);
       await airlock.addToken(wbtc.address, wbtcRewardPool.address);
       await armorToken.transfer(airlock.address, armorInAirlock);
+
+      await wbtc.approve(airlock.address, constants.MAX_UINT256);
+      await weth.approve(airlock.address, constants.MAX_UINT256);
     });
 
     it('Revert if token is not added', async () => {
@@ -239,12 +254,17 @@ contract('airlock', function (accounts) {
       );
     });
 
-    it('deposit eth', async () => {
+    it('deposit eth through deposit function', async () => {
       const depositAmount = new BN('10').mul(ethUnit);
       const wethBalanceBefore = new BN(await weth.balanceOf(OWNER));
-      await airlock.deposit(beneficiary, weth.address, depositAmount, {
-        value: depositAmount,
-      });
+      const tx = await airlock.deposit(
+        beneficiary,
+        weth.address,
+        depositAmount,
+        {
+          value: depositAmount,
+        },
+      );
       const currentTime = new BN(await time.latest());
 
       assert.equal(wethBalanceBefore.toString(), await weth.balanceOf(OWNER));
@@ -253,7 +273,7 @@ contract('airlock', function (accounts) {
         .div(initalWethLp);
       assert.equal(
         armorInAirlock.sub(requiredArmorAmount).toString(),
-        await armorToken.balanceOf(airlock.address),
+        (await armorToken.balanceOf(airlock.address)).toString(),
       );
       assert.equal(
         initalWethLp.add(depositAmount).toString(),
@@ -287,6 +307,407 @@ contract('airlock', function (accounts) {
       assert.equal(poolInfo.lpStaked.toString(), liquidityCreated.toString());
       assert.equal(poolInfo.reward, 0);
       assert.equal(poolInfo.accArmorPerLp, 0);
+
+      expectEvent(tx, 'LPQueued', {
+        holder: beneficiary,
+        pair: wethPair.address,
+        lpAmount: liquidityCreated.toString(),
+        tokenAmount: depositAmount.toString(),
+        armorAmount: requiredArmorAmount.toString(),
+        maturity: currentTime.add(lockPeriod).toString(),
+      });
+    });
+
+    it('deposit weth', async () => {
+      const depositAmount = new BN('10').mul(ethUnit);
+      const wethBalanceBefore = new BN(await weth.balanceOf(OWNER));
+      const tx = await airlock.deposit(
+        beneficiary,
+        weth.address,
+        depositAmount,
+      );
+      const currentTime = new BN(await time.latest());
+
+      assert.equal(
+        wethBalanceBefore.sub(depositAmount).toString(),
+        await weth.balanceOf(OWNER),
+      );
+      let requiredArmorAmount = depositAmount
+        .mul(initalArmorLpForWeth)
+        .div(initalWethLp);
+      assert.equal(
+        armorInAirlock.sub(requiredArmorAmount).toString(),
+        (await armorToken.balanceOf(airlock.address)).toString(),
+      );
+      assert.equal(
+        initalWethLp.add(depositAmount).toString(),
+        (await weth.balanceOf(wethPair.address)).toString(),
+      );
+      assert.equal(
+        initalArmorLpForWeth.add(requiredArmorAmount).toString(),
+        (await armorToken.balanceOf(wethPair.address)).toString(),
+      );
+      let liquidityCreated = new BN(await wethPair.totalSupply())
+        .mul(depositAmount)
+        .div(initalWethLp.add(depositAmount));
+      assert.equal(
+        liquidityCreated.toString(),
+        (await wethPair.balanceOf(wethRewardPool.address)).toString(),
+      );
+      assert.equal(await airlock.lockedLPLength(beneficiary), 1);
+      let lpBatch = await airlock.lockedLP(beneficiary, 0);
+      assert.equal(lpBatch.holder, beneficiary);
+      assert.equal(lpBatch.pair, wethPair.address);
+      assert.equal(lpBatch.amount.toString(), liquidityCreated.toString());
+      assert.equal(lpBatch.claimedAmount, 0);
+      assert.equal(lpBatch.rewardDebt, 0);
+      assert.equal(
+        lpBatch.maturity.toString(),
+        currentTime.add(lockPeriod).toString(),
+      );
+
+      let poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.pool, wethRewardPool.address);
+      assert.equal(poolInfo.lpStaked.toString(), liquidityCreated.toString());
+      assert.equal(poolInfo.reward, 0);
+      assert.equal(poolInfo.accArmorPerLp, 0);
+
+      expectEvent(tx, 'LPQueued', {
+        holder: beneficiary,
+        pair: wethPair.address,
+        lpAmount: liquidityCreated.toString(),
+        tokenAmount: depositAmount.toString(),
+        armorAmount: requiredArmorAmount.toString(),
+        maturity: currentTime.add(lockPeriod).toString(),
+      });
+    });
+
+    it('deposit wbtc', async () => {
+      const depositAmount = new BN('1').mul(btcUnit);
+      const wbtcBalanceBefore = new BN(await wbtc.balanceOf(OWNER));
+      const tx = await airlock.deposit(
+        beneficiary,
+        wbtc.address,
+        depositAmount,
+      );
+      const currentTime = new BN(await time.latest());
+
+      assert.equal(
+        wbtcBalanceBefore.sub(depositAmount).toString(),
+        await wbtc.balanceOf(OWNER),
+      );
+      let requiredArmorAmount = depositAmount
+        .mul(initalArmorLpForWbtc)
+        .div(initalWbtcLp);
+      assert.equal(
+        armorInAirlock.sub(requiredArmorAmount).toString(),
+        (await armorToken.balanceOf(airlock.address)).toString(),
+      );
+      assert.equal(
+        initalWbtcLp.add(depositAmount).toString(),
+        (await wbtc.balanceOf(wbtcPair.address)).toString(),
+      );
+      assert.equal(
+        initalArmorLpForWbtc.add(requiredArmorAmount).toString(),
+        (await armorToken.balanceOf(wbtcPair.address)).toString(),
+      );
+      let liquidityCreated = new BN(await wbtcPair.totalSupply())
+        .mul(depositAmount)
+        .div(initalWbtcLp.add(depositAmount));
+      assert.equal(
+        liquidityCreated.toString(),
+        (await wbtcPair.balanceOf(wbtcRewardPool.address)).toString(),
+      );
+      assert.equal(await airlock.lockedLPLength(beneficiary), 1);
+      let lpBatch = await airlock.lockedLP(beneficiary, 0);
+      assert.equal(lpBatch.holder, beneficiary);
+      assert.equal(lpBatch.pair, wbtcPair.address);
+      assert.equal(lpBatch.amount.toString(), liquidityCreated.toString());
+      assert.equal(lpBatch.claimedAmount, 0);
+      assert.equal(lpBatch.rewardDebt, 0);
+      assert.equal(
+        lpBatch.maturity.toString(),
+        currentTime.add(lockPeriod).toString(),
+      );
+
+      let poolInfo = await airlock.rewardPools(wbtcPair.address);
+      assert.equal(poolInfo.pool, wbtcRewardPool.address);
+      assert.equal(poolInfo.lpStaked.toString(), liquidityCreated.toString());
+      assert.equal(poolInfo.reward, 0);
+      assert.equal(poolInfo.accArmorPerLp, 0);
+
+      expectEvent(tx, 'LPQueued', {
+        holder: beneficiary,
+        pair: wbtcPair.address,
+        lpAmount: liquidityCreated.toString(),
+        tokenAmount: depositAmount.toString(),
+        armorAmount: requiredArmorAmount.toString(),
+        maturity: currentTime.add(lockPeriod).toString(),
+      });
+    });
+  });
+
+  describe('claimLP and armor reward', async () => {
+    beforeEach(async () => {
+      await airlock.addToken(weth.address, wethRewardPool.address);
+      await armorToken.transfer(airlock.address, armorInAirlock);
+
+      await weth.approve(airlock.address, constants.MAX_UINT256);
+    });
+
+    it('Revert if id is greater than length', async () => {
+      await expectRevert(
+        airlock.claimArmorReward('1', { from: beneficiary }),
+        'Airlock: nothing to claim.',
+      );
+
+      await expectRevert(
+        airlock.claimLP('1', { from: beneficiary }),
+        'Airlock: nothing to claim.',
+      );
+    });
+
+    it('Revert to claimLP before maturity', async () => {
+      const depositAmount = new BN('10').mul(ethUnit);
+      await airlock.deposit(beneficiary, weth.address, depositAmount);
+
+      await time.increase(lockPeriod.sub(new BN(5)).toString());
+      await expectRevert(
+        airlock.claimLP('0', { from: beneficiary }),
+        'Airlock: LP still locked.',
+      );
+    });
+
+    it('claimLP linerly', async () => {
+      const depositAmount = new BN('10').mul(ethUnit);
+      await airlock.deposit(beneficiary, weth.address, depositAmount);
+      const currentTime = new BN(await time.latest());
+
+      let liquidityCreated = new BN(await wethPair.totalSupply())
+        .mul(depositAmount)
+        .div(initalWethLp.add(depositAmount));
+
+      let timeAfterLockPeriod = new BN('886400');
+      await time.increase(lockPeriod.add(timeAfterLockPeriod).toString());
+      let lpBalanceBefore = new BN(await wethPair.balanceOf(beneficiary));
+      let claimableLP = liquidityCreated
+        .mul(timeAfterLockPeriod)
+        .div(vestingPeriod);
+      let tx = await airlock.claimLP(0, { from: beneficiary });
+
+      assert.equal(
+        lpBalanceBefore.add(claimableLP).toString(),
+        (await wethPair.balanceOf(beneficiary)).toString(),
+      );
+      expectEvent(tx, 'LPClaimed', {
+        holder: beneficiary,
+        pair: wethPair.address,
+        amount: claimableLP.toString(),
+      });
+
+      let lpBatch = await airlock.lockedLP(beneficiary, 0);
+      assert.equal(lpBatch.holder, beneficiary);
+      assert.equal(lpBatch.pair, wethPair.address);
+      assert.equal(lpBatch.amount.toString(), liquidityCreated.toString());
+      assert.equal(lpBatch.claimedAmount.toString(), claimableLP.toString());
+      assert.equal(lpBatch.rewardDebt, 0);
+      assert.equal(
+        lpBatch.maturity.toString(),
+        currentTime.add(lockPeriod).toString(),
+      );
+
+      let poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.pool, wethRewardPool.address);
+      assert.equal(
+        poolInfo.lpStaked.toString(),
+        liquidityCreated.sub(claimableLP).toString(),
+      );
+      assert.equal(poolInfo.reward, 0);
+      assert.equal(poolInfo.accArmorPerLp, 0);
+
+      await expectRevert(
+        airlock.claimLP('0', { from: beneficiary }),
+        'Airlock: nothing to claim.',
+      );
+
+      let currentClaimedLP = claimableLP;
+
+      let timeAlreadyPassed = timeAfterLockPeriod;
+      timeAfterLockPeriod = new BN('1772800');
+      await time.increase(timeAfterLockPeriod.toString());
+      lpBalanceBefore = new BN(await wethPair.balanceOf(beneficiary));
+      claimableLP = liquidityCreated
+        .mul(timeAfterLockPeriod.add(timeAlreadyPassed))
+        .div(vestingPeriod)
+        .sub(currentClaimedLP);
+      tx = await airlock.claimLP(0, { from: beneficiary });
+
+      assert.equal(
+        lpBalanceBefore.add(claimableLP).toString(),
+        (await wethPair.balanceOf(beneficiary)).toString(),
+      );
+      expectEvent(tx, 'LPClaimed', {
+        holder: beneficiary,
+        pair: wethPair.address,
+        amount: claimableLP.toString(),
+      });
+
+      lpBatch = await airlock.lockedLP(beneficiary, 0);
+      assert.equal(lpBatch.holder, beneficiary);
+      assert.equal(lpBatch.pair, wethPair.address);
+      assert.equal(lpBatch.amount.toString(), liquidityCreated.toString());
+      assert.equal(
+        lpBatch.claimedAmount.toString(),
+        claimableLP.add(currentClaimedLP).toString(),
+      );
+      assert.equal(lpBatch.rewardDebt, 0);
+      assert.equal(
+        lpBatch.maturity.toString(),
+        currentTime.add(lockPeriod).toString(),
+      );
+
+      poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.pool, wethRewardPool.address);
+      assert.equal(
+        poolInfo.lpStaked.toString(),
+        liquidityCreated.sub(claimableLP).sub(currentClaimedLP).toString(),
+      );
+      assert.equal(poolInfo.reward, 0);
+      assert.equal(poolInfo.accArmorPerLp, 0);
+
+      currentClaimedLP = currentClaimedLP.add(claimableLP);
+
+      timeAlreadyPassed = timeAlreadyPassed.add(timeAfterLockPeriod);
+      timeAfterLockPeriod = vestingPeriod.sub(timeAlreadyPassed);
+      await time.increase(timeAfterLockPeriod.toString());
+      lpBalanceBefore = new BN(await wethPair.balanceOf(beneficiary));
+      claimableLP = liquidityCreated.sub(currentClaimedLP);
+      tx = await airlock.claimLP(0, { from: beneficiary });
+
+      assert.equal(
+        lpBalanceBefore.add(claimableLP).toString(),
+        (await wethPair.balanceOf(beneficiary)).toString(),
+      );
+      expectEvent(tx, 'LPClaimed', {
+        holder: beneficiary,
+        pair: wethPair.address,
+        amount: claimableLP.toString(),
+      });
+
+      lpBatch = await airlock.lockedLP(beneficiary, 0);
+      assert.equal(lpBatch.holder, beneficiary);
+      assert.equal(lpBatch.pair, wethPair.address);
+      assert.equal(lpBatch.amount.toString(), liquidityCreated.toString());
+      assert.equal(
+        lpBatch.claimedAmount.toString(),
+        liquidityCreated.toString(),
+      );
+      assert.equal(lpBatch.rewardDebt, 0);
+      assert.equal(
+        lpBatch.maturity.toString(),
+        currentTime.add(lockPeriod).toString(),
+      );
+
+      poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.pool, wethRewardPool.address);
+      assert.equal(poolInfo.lpStaked.toString(), '0');
+      assert.equal(poolInfo.reward, 0);
+      assert.equal(poolInfo.accArmorPerLp, 0);
+    });
+
+    it('claim', async () => {
+      const depositAmount = new BN('10').mul(ethUnit);
+      await airlock.deposit(beneficiary, weth.address, depositAmount);
+      await time.increase('10');
+
+      // First reward claim
+      let rewardAmount = new BN('100').mul(armorUnit);
+      await sendArmorReward(wethRewardPool, rewardAmount);
+
+      let armorBalanceBefore = new BN(await armorToken.balanceOf(beneficiary));
+      let armorBalanceInAirLock = new BN(
+        await armorToken.balanceOf(airlock.address),
+      );
+      let tx = await airlock.claimArmorReward(0, { from: beneficiary });
+
+      let liquidityCreated = new BN(await wethPair.totalSupply())
+        .mul(depositAmount)
+        .div(initalWethLp.add(depositAmount));
+
+      let accArmorPerLp = rewardAmount
+        .mul(rewardMultiplier)
+        .div(liquidityCreated);
+
+      let rewardToClaim = accArmorPerLp
+        .mul(liquidityCreated)
+        .div(rewardMultiplier);
+
+      expectEvent(tx, 'RewardClaimed', {
+        holder: beneficiary,
+        amount: rewardToClaim.toString(),
+      });
+
+      let remainingReward = rewardAmount.sub(rewardToClaim);
+      let poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.reward.toString(), remainingReward.toString());
+      assert.equal(poolInfo.accArmorPerLp.toString(), accArmorPerLp.toString());
+
+      assert.equal(
+        armorBalanceInAirLock.add(rewardAmount).sub(rewardToClaim).toString(),
+        (await armorToken.balanceOf(airlock.address)).toString(),
+      );
+      assert.equal(
+        remainingReward.toString(),
+        (await airlock.armorReward()).toString(),
+      );
+      assert.equal(
+        armorBalanceBefore.add(rewardToClaim).toString(),
+        (await armorToken.balanceOf(beneficiary)).toString(),
+      );
+
+      // Second reward claim
+      await time.increase('10');
+
+      rewardAmount = new BN('200').mul(armorUnit);
+      await sendArmorReward(wethRewardPool, rewardAmount);
+
+      armorBalanceBefore = new BN(await armorToken.balanceOf(beneficiary));
+      armorBalanceInAirLock = new BN(
+        await armorToken.balanceOf(airlock.address),
+      );
+      tx = await airlock.claimArmorReward(0, { from: beneficiary });
+
+      accArmorPerLp = accArmorPerLp.add(
+        rewardAmount.mul(rewardMultiplier).div(liquidityCreated),
+      );
+
+      rewardToClaim = accArmorPerLp
+        .mul(liquidityCreated)
+        .div(rewardMultiplier)
+        .sub(rewardToClaim);
+
+      expectEvent(tx, 'RewardClaimed', {
+        holder: beneficiary,
+        amount: rewardToClaim.toString(),
+      });
+
+      remainingReward = remainingReward.add(rewardAmount.sub(rewardToClaim));
+      poolInfo = await airlock.rewardPools(wethPair.address);
+      assert.equal(poolInfo.reward.toString(), remainingReward.toString());
+      assert.equal(poolInfo.accArmorPerLp.toString(), accArmorPerLp.toString());
+
+      assert.equal(
+        armorBalanceInAirLock.add(rewardAmount).sub(rewardToClaim).toString(),
+        (await armorToken.balanceOf(airlock.address)).toString(),
+      );
+      assert.equal(
+        remainingReward.toString(),
+        (await airlock.armorReward()).toString(),
+      );
+      assert.equal(
+        armorBalanceBefore.add(rewardToClaim).toString(),
+        (await armorToken.balanceOf(beneficiary)).toString(),
+      );
     });
   });
 });
