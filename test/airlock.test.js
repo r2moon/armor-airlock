@@ -1,5 +1,3 @@
-const Ganache = require('./helpers/ganache');
-const deployUniswap = require('./helpers/deployUniswap');
 const {
   expectEvent,
   expectRevert,
@@ -12,11 +10,11 @@ const Airlock = artifacts.require('Airlock');
 const IUniswapV2Pair = artifacts.require('IUniswapV2Pair');
 const MockERC20 = artifacts.require('MockERC20');
 const MockRewardPool = artifacts.require('MockRewardPool');
+const UniswapFactory = artifacts.require('UniswapFactory');
+const UniswapWETH = artifacts.require('UniswapWETH');
+const UniswapRouter = artifacts.require('UniswapRouter');
 
 contract('airlock', function (accounts) {
-  const ganache = new Ganache(web3);
-  afterEach('revert', ganache.revert);
-
   const OWNER = accounts[0];
   const NOT_OWNER = accounts[1];
   const beneficiary = accounts[2];
@@ -45,17 +43,18 @@ contract('airlock', function (accounts) {
   const initalArmorLpForWeth = new BN('10000').mul(armorUnit); // 10000 ARMOR
   const initalWbtcLp = new BN('10').mul(btcUnit); // 10 WBTC
   const initalArmorLpForWbtc = new BN('100000').mul(armorUnit); // 100000 ARMOR
-  const armorInAirlock = new BN('10000000').mul(armorUnit); // 10000000 ARMOR
 
   const sendArmorReward = async (rewardPool, amount) => {
     await armorToken.transfer(rewardPool.address, amount);
   };
 
   beforeEach(async function () {
-    const contracts = await deployUniswap(accounts);
-    uniswapFactory = contracts.uniswapFactory;
-    uniswapRouter = contracts.uniswapRouter;
-    weth = contracts.weth;
+    uniswapFactory = await UniswapFactory.new(OWNER);
+    weth = await UniswapWETH.new();
+    uniswapRouter = await UniswapRouter.new(
+      uniswapFactory.address,
+      weth.address,
+    );
 
     armorToken = await MockERC20.new(
       'ARMOR',
@@ -118,7 +117,6 @@ contract('airlock', function (accounts) {
       wbtcPair.address,
       armorToken.address,
     );
-    await ganache.snapshot();
   });
 
   describe('Check init configuration', async () => {
@@ -146,6 +144,10 @@ contract('airlock', function (accounts) {
         (await airlock.vestingPeriod()).toString(),
         vestingPeriod.toString(),
       );
+    });
+
+    it('check totalAllocation', async () => {
+      assert.equal((await airlock.totalAllocation()).toString(), '0');
     });
   });
 
@@ -188,7 +190,7 @@ contract('airlock', function (accounts) {
     });
 
     it('should add token by owner', async () => {
-      await airlock.addToken(weth.address, wethRewardPool.address);
+      const tx = await airlock.addToken(weth.address, wethRewardPool.address);
 
       assert.equal(await airlock.pairs(weth.address), wethPair.address);
       const poolInfo = await airlock.rewardPools(wethPair.address);
@@ -196,17 +198,163 @@ contract('airlock', function (accounts) {
       assert.equal(poolInfo.lpStaked, '0');
       assert.equal(poolInfo.reward, '0');
       assert.equal(poolInfo.accArmorPerLp, '0');
+
+      expectEvent(tx, 'TokenAdded', {
+        token: weth.address,
+        pair: wethPair.address,
+        rewardPool: wethRewardPool.address,
+      });
+    });
+  });
+
+  describe('increaseAllocation', async () => {
+    it('Revert if sender is not owner', async () => {
+      await expectRevert(
+        airlock.increaseAllocation(accounts[1], '1000000000', {
+          from: NOT_OWNER,
+        }),
+        'Ownable: caller is not the owner',
+      );
+    });
+
+    it('Revert if user is zero', async () => {
+      await expectRevert(
+        airlock.increaseAllocation(constants.ZERO_ADDRESS, '1000000000'),
+        'Airlock: User cannot be zero',
+      );
+    });
+
+    it('should increase armor allocation', async () => {
+      let amount1 = new BN('1000').mul(armorUnit);
+      let amount2 = new BN('500').mul(armorUnit);
+      let amount3 = new BN('800').mul(armorUnit);
+      await armorToken.approve(
+        airlock.address,
+        amount1.add(amount2).add(amount3),
+      );
+
+      const armorBalanceBefore = new BN(await armorToken.balanceOf(OWNER));
+      const tx = await airlock.increaseAllocation(accounts[1], amount1);
+
+      assert.equal(
+        (await armorToken.balanceOf(OWNER)).toString(),
+        armorBalanceBefore.sub(amount1).toString(),
+      );
+
+      assert.equal(
+        (await armorToken.balanceOf(airlock.address)).toString(),
+        amount1.toString(),
+      );
+      assert.equal(
+        (await airlock.allocation(accounts[1])).toString(),
+        amount1.toString(),
+      );
+      assert.equal(
+        (await airlock.totalAllocation()).toString(),
+        amount1.toString(),
+      );
+
+      expectEvent(tx, 'ArmorAllocationIncreased', {
+        user: accounts[1],
+        amount: amount1.toString(),
+      });
+
+      await airlock.increaseAllocation(accounts[2], amount2);
+
+      assert.equal(
+        (await armorToken.balanceOf(airlock.address)).toString(),
+        amount1.add(amount2).toString(),
+      );
+      assert.equal(
+        (await airlock.allocation(accounts[2])).toString(),
+        amount2.toString(),
+      );
+      assert.equal(
+        (await airlock.totalAllocation()).toString(),
+        amount1.add(amount2).toString(),
+      );
+
+      await airlock.increaseAllocation(accounts[1], amount3);
+
+      assert.equal(
+        (await armorToken.balanceOf(airlock.address)).toString(),
+        amount1.add(amount2).add(amount3).toString(),
+      );
+      assert.equal(
+        (await airlock.allocation(accounts[1])).toString(),
+        amount1.add(amount3).toString(),
+      );
+      assert.equal(
+        (await airlock.totalAllocation()).toString(),
+        amount1.add(amount2).add(amount3).toString(),
+      );
+    });
+  });
+
+  describe('decreaseAllocation', async () => {
+    it('Revert if sender is not owner', async () => {
+      await expectRevert(
+        airlock.decreaseAllocation(accounts[1], '1000000000', {
+          from: NOT_OWNER,
+        }),
+        'Ownable: caller is not the owner',
+      );
+    });
+
+    it('Revert if user is zero', async () => {
+      await expectRevert(
+        airlock.decreaseAllocation(constants.ZERO_ADDRESS, '1000000000'),
+        'Airlock: User cannot be zero',
+      );
+    });
+
+    it('should decrease armor allocation', async () => {
+      let amount1 = new BN('1000').mul(armorUnit);
+      let amount2 = new BN('500').mul(armorUnit);
+
+      await armorToken.approve(airlock.address, amount1.add(amount2));
+      await airlock.increaseAllocation(accounts[1], amount1);
+
+      const armorBalanceBefore = new BN(await armorToken.balanceOf(OWNER));
+      const tx = await airlock.decreaseAllocation(accounts[1], amount2);
+
+      assert.equal(
+        (await armorToken.balanceOf(OWNER)).toString(),
+        armorBalanceBefore.add(amount2).toString(),
+      );
+
+      assert.equal(
+        (await armorToken.balanceOf(airlock.address)).toString(),
+        amount1.sub(amount2).toString(),
+      );
+      assert.equal(
+        (await airlock.allocation(accounts[1])).toString(),
+        amount1.sub(amount2).toString(),
+      );
+      assert.equal(
+        (await airlock.totalAllocation()).toString(),
+        amount1.sub(amount2).toString(),
+      );
+
+      expectEvent(tx, 'ArmorAllocationDecreased', {
+        user: accounts[1],
+        amount: amount2.toString(),
+      });
     });
   });
 
   describe('deposit', async () => {
+    let allocation = new BN('10000').mul(ethUnit);
+
     beforeEach(async () => {
       await airlock.addToken(weth.address, wethRewardPool.address);
       await airlock.addToken(wbtc.address, wbtcRewardPool.address);
-      await armorToken.transfer(airlock.address, armorInAirlock);
 
       await wbtc.approve(airlock.address, constants.MAX_UINT256);
       await weth.approve(airlock.address, constants.MAX_UINT256);
+
+      await armorToken.approve(airlock.address, allocation);
+      await airlock.increaseAllocation(beneficiary, allocation);
     });
 
     it('Revert if token is not added', async () => {
@@ -244,13 +392,13 @@ contract('airlock', function (accounts) {
       );
     });
 
-    it('Revert if no enough ARMOR in airlock contract', async () => {
-      await airlock.flushToTreasury(armorInAirlock, accounts[7]);
+    it('Revert if no enough allocation', async () => {
+      await airlock.decreaseAllocation(beneficiary, allocation);
       await expectRevert(
         airlock.deposit(beneficiary, weth.address, '1000', {
           value: '1000',
         }),
-        'Airlock: insufficient ARMOR in AirLock',
+        'Airlock: Not enough allocation',
       );
     });
 
@@ -272,7 +420,7 @@ contract('airlock', function (accounts) {
         .mul(initalArmorLpForWeth)
         .div(initalWethLp);
       assert.equal(
-        armorInAirlock.sub(requiredArmorAmount).toString(),
+        allocation.sub(requiredArmorAmount).toString(),
         (await armorToken.balanceOf(airlock.address)).toString(),
       );
       assert.equal(
@@ -336,7 +484,7 @@ contract('airlock', function (accounts) {
         .mul(initalArmorLpForWeth)
         .div(initalWethLp);
       assert.equal(
-        armorInAirlock.sub(requiredArmorAmount).toString(),
+        allocation.sub(requiredArmorAmount).toString(),
         (await armorToken.balanceOf(airlock.address)).toString(),
       );
       assert.equal(
@@ -400,7 +548,7 @@ contract('airlock', function (accounts) {
         .mul(initalArmorLpForWbtc)
         .div(initalWbtcLp);
       assert.equal(
-        armorInAirlock.sub(requiredArmorAmount).toString(),
+        allocation.sub(requiredArmorAmount).toString(),
         (await armorToken.balanceOf(airlock.address)).toString(),
       );
       assert.equal(
@@ -448,11 +596,15 @@ contract('airlock', function (accounts) {
   });
 
   describe('claimLP and armor reward', async () => {
+    let allocation = new BN('10000').mul(ethUnit);
+
     beforeEach(async () => {
       await airlock.addToken(weth.address, wethRewardPool.address);
-      await armorToken.transfer(airlock.address, armorInAirlock);
 
       await weth.approve(airlock.address, constants.MAX_UINT256);
+
+      await armorToken.approve(airlock.address, allocation);
+      await airlock.increaseAllocation(beneficiary, allocation);
     });
 
     it('Revert if id is greater than length', async () => {
@@ -521,11 +673,6 @@ contract('airlock', function (accounts) {
       );
       assert.equal(poolInfo.reward, 0);
       assert.equal(poolInfo.accArmorPerLp, 0);
-
-      await expectRevert(
-        airlock.claimLP('0', { from: beneficiary }),
-        'Airlock: nothing to claim.',
-      );
 
       let currentClaimedLP = claimableLP;
 

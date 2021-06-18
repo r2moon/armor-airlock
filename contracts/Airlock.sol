@@ -24,9 +24,9 @@ contract Airlock is Ownable, ReentrancyGuard {
     mapping(address => address) public pairs;
     mapping(address => LpPool) public rewardPools;
     mapping(address => uint256) public totalLpAmount;
+    mapping(address => uint256) public allocation;
+    uint256 public totalAllocation;
     uint256 public armorReward;
-
-    bool private locked;
 
     struct LPbatch {
         address holder;
@@ -60,6 +60,16 @@ contract Airlock is Ownable, ReentrancyGuard {
         uint256 amount
     );
 
+    event TokenAdded(
+        address indexed token,
+        address indexed pair,
+        address indexed rewardPool
+    );
+
+    event ArmorAllocationIncreased(address indexed user, uint256 amount);
+
+    event ArmorAllocationDecreased(address indexed user, uint256 amount);
+
     event RewardClaimed(address indexed holder, uint256 amount);
 
     constructor(
@@ -92,19 +102,34 @@ contract Airlock is Ownable, ReentrancyGuard {
             reward: 0,
             accArmorPerLp: 0
         });
+
+        emit TokenAdded(token, pair, rewardPool);
     }
 
-    function flushToTreasury(uint256 amount, address treasury)
+    function increaseAllocation(address user, uint256 amount)
         external
         onlyOwner
     {
-        require(treasury != address(0), "Airlock: treasury cannot be zero");
-        uint256 balance = IERC20(ARMOR).balanceOf(address(this));
-        require(
-            balance.sub(armorReward) >= amount,
-            "Airlock: insufficient ARMOR in AirLock"
-        );
-        IERC20(ARMOR).safeTransfer(treasury, amount);
+        require(user != address(0), "Airlock: User cannot be zero");
+
+        IERC20(ARMOR).safeTransferFrom(owner(), address(this), amount);
+        allocation[user] = allocation[user].add(amount);
+        totalAllocation = totalAllocation.add(amount);
+
+        emit ArmorAllocationIncreased(user, amount);
+    }
+
+    function decreaseAllocation(address user, uint256 amount)
+        external
+        onlyOwner
+    {
+        require(user != address(0), "Airlock: User cannot be zero");
+
+        IERC20(ARMOR).safeTransfer(owner(), amount);
+        allocation[user] = allocation[user].sub(amount);
+        totalAllocation = totalAllocation.sub(amount);
+
+        emit ArmorAllocationDecreased(user, amount);
     }
 
     function deposit(
@@ -145,6 +170,12 @@ contract Airlock is Ownable, ReentrancyGuard {
             );
         }
 
+        require(
+            allocation[beneficiary] >= armorRequired,
+            "Airlock: Not enough allocation"
+        );
+        allocation[beneficiary] = allocation[beneficiary].sub(armorRequired);
+
         uint256 balance = IERC20(ARMOR).balanceOf(address(this));
         require(
             balance.sub(armorReward) >= armorRequired,
@@ -182,10 +213,6 @@ contract Airlock is Ownable, ReentrancyGuard {
         );
     }
 
-    receive() external payable {
-        deposit(msg.sender, WETH, msg.value);
-    }
-
     function claimLP(uint256 id) external {
         require(id < lockedLP[msg.sender].length, "Airlock: nothing to claim.");
         LPbatch storage batch = lockedLP[msg.sender][id];
@@ -199,7 +226,7 @@ contract Airlock is Ownable, ReentrancyGuard {
             amountToClaim = batch.amount;
         }
         require(
-            batch.claimedAmount < amountToClaim,
+            batch.claimedAmount <= amountToClaim,
             "Airlock: nothing to claim."
         );
         _updatePool(batch.pair);
@@ -325,11 +352,11 @@ contract Airlock is Ownable, ReentrancyGuard {
         if (rewardToClaim > 0) {
             IERC20(ARMOR).safeTransfer(holder, rewardToClaim);
             pool.reward = pool.reward.sub(rewardToClaim);
+            armorReward = armorReward.sub(rewardToClaim);
             lpBatch.rewardDebt = pool
                 .accArmorPerLp
                 .mul(lpBatch.amount.sub(lpBatch.claimedAmount))
                 .div(1e12);
-            armorReward = armorReward.sub(rewardToClaim);
 
             emit RewardClaimed(holder, rewardToClaim);
         }

@@ -20,6 +20,7 @@ module.exports = {
       host: '127.0.0.1', // Localhost (default: none)
       port: 8545, // Standard Ethereum port (default: none)
       network_id: '*', // Any network (default: none)
+      // disableConfirmationListener: true,
     },
 
     kovan: {
@@ -63,7 +64,10 @@ module.exports = {
       },
     },
   },
-
+  mocha: {
+    enableTimeouts: false,
+    before_timeout: 120000, // Here is 2min but can be whatever timeout is suitable for you.
+  },
   plugins: ['truffle-plugin-verify'],
 
   api_keys: {
