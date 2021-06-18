@@ -9,7 +9,7 @@
   "scripts": {
     "test": "truffle test",
     "compile": "truffle compile",
-    "ganache": "ganache-cli -e 12000 -g 200000000000",
+    "ganache": "ganache-cli -e 200000 -g 2000000 --noVMErrorsOnRPCResponse",
     "deploy:kovan": "npm run compile && truffle migrate --network kovan"
   },
   "author": "",
